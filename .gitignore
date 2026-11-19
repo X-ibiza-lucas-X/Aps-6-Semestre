@@ -1,1 +1,21 @@
-unipay_v12.db
+# Ambiente virtual Python
+venv/
+.venv/
+env/
+
+# Cache do Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Banco de dados SQLite local e relatórios gerados em teste
+*.db
+*.sqlite3
+relatorio_metricas_etp.txt
+resultados_benchmark.csv
+
+# Configurações locais de IDE e Sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
