@@ -1,4 +1,4 @@
-# Sistema de Validação de Transações Bancárias por Faixa de Valor
+# APS 6° Semestre
 
 Projeto desenvolvido para a disciplina de **Processamento de Imagens e Visão Computacional** (6º Semestre de Ciências da Computação — UNIP | Profa. Stephany Oliveira)[cite: 1, 4].
 

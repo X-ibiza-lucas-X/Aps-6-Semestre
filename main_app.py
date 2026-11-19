@@ -18,7 +18,7 @@ class SistemaBancarioApp:
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("UNIP Bank - Validação Biométrica & Cofre de Segurança Máxima (PIVC / APS)")
+        self.root.title("APS 6° Semestre | UNIP Bank - Validação Biométrica")
         self.root.geometry("1060x710")
         self.root.configure(bg="#0F172A")
         self.root.resizable(False, False)
