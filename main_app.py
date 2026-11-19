@@ -79,14 +79,14 @@ class SistemaBancarioApp:
             fg="#94A3B8"
         ).pack(pady=(0, 18))
 
-        # Quadro informativo com os logins rápidos da equipe
         dica_equipe = tk.Label(
             container,
             text=(
-                "Contas Pré-Cadastradas (Senha: 1234):\n"
-                "• 1001-0 (gustavo)   • 1002-0 (higor / igor)\n"
-                "• 1003-0 (lucas)     • 1004-0 (moises)\n"
-                "• 1005-0 (guilherme)"
+                "Contas pré-cadastradas (senha: 234):\n"
+                "• Gustavo (1001-0)   • Igor (1002-0)\n"
+                "• Lucas (1003-0)     • Moisés (1004-0)\n"
+                "• Guilherme (1005-0)\n"
+                "Após entrar, cadastre sua biometria no botão do painel."
             ),
             font=("Arial", 9),
             bg="#0F172A",
@@ -126,6 +126,160 @@ class SistemaBancarioApp:
             container, text="ENTRAR NA CONTA", font=("Arial", 11, "bold"),
             bg="#0284C7", fg="white", activebackground="#0369A1", cursor="hand2",
             width=32, pady=9, bd=0, command=realizar_login
+        ).pack(pady=(0, 12))
+
+        def iniciar_login_biometrico():
+            identificador = entry_conta.get().strip()
+            if not identificador:
+                messagebox.showwarning(
+                    "Conta Obrigatória",
+                    "Informe seu nome ou número de conta para validar a biometria."
+                )
+                return
+
+            pronto, usuario, mensagem = self.db.obter_usuario_login_biometrico(identificador)
+            if not pronto or usuario is None:
+                messagebox.showerror("Login Facial Indisponível", mensagem)
+                return
+
+            if not self.pipeline.iniciar_camera():
+                messagebox.showerror("Erro de Câmera", "Não foi possível iniciar a webcam.")
+                return
+
+            modal = tk.Toplevel(self.root)
+            modal.title("Entrar com Biometria Facial")
+            modal.geometry("520x500")
+            modal.configure(bg="#1E293B")
+            modal.transient(self.root)
+            modal.grab_set()
+
+            tk.Label(
+                modal,
+                text=f"LOGIN FACIAL - {usuario['nome']}",
+                font=("Arial", 12, "bold"),
+                bg="#0284C7",
+                fg="white",
+                pady=10
+            ).pack(fill="x")
+
+            lbl_camera = tk.Label(modal, bg="#000000", width=420, height=315)
+            lbl_camera.pack(pady=12)
+
+            lbl_status = tk.Label(
+                modal,
+                text="Centralize seu rosto e clique em Validar identidade.",
+                font=("Arial", 10, "bold"),
+                bg="#0F172A",
+                fg="#FBBF24",
+                wraplength=460,
+                pady=10,
+                padx=12
+            )
+            lbl_status.pack(fill="x", padx=25, pady=(0, 10))
+
+            estado = {"ativo": True, "frame": None}
+
+            def fechar_modal():
+                estado["ativo"] = False
+                self.pipeline.liberar_camera()
+                modal.destroy()
+
+            modal.protocol("WM_DELETE_WINDOW", fechar_modal)
+
+            def atualizar_preview():
+                if not estado["ativo"]:
+                    return
+                ok, frame = self.pipeline.capturar_frame()
+                if ok and frame is not None:
+                    estado["frame"] = frame
+                    exibicao = cv2.resize(frame, (420, 315))
+                    imagem = ImageTk.PhotoImage(
+                        image=Image.fromarray(cv2.cvtColor(exibicao, cv2.COLOR_BGR2RGB))
+                    )
+                    lbl_camera.imgtk = imagem
+                    lbl_camera.configure(image=imagem)
+                else:
+                    lbl_status.configure(
+                        text="Sem imagem da webcam. Verifique a câmera e tente novamente.",
+                        fg="#F87171"
+                    )
+                modal.after(35, atualizar_preview)
+
+            def validar_rosto():
+                frame = estado["frame"]
+                if frame is None:
+                    lbl_status.configure(text="Aguardando imagem da webcam...", fg="#FBBF24")
+                    return
+
+                botao_validar.configure(state="disabled")
+                lbl_status.configure(text="Analisando o rosto...", fg="#38BDF8")
+                modal.update_idletasks()
+
+                try:
+                    extracao = self.pipeline.extrair_caracteristicas_completas(frame.copy())
+                except (RuntimeError, ValueError) as erro:
+                    lbl_status.configure(
+                        text=f"Não foi possível analisar a imagem: {erro}",
+                        fg="#F87171"
+                    )
+                    botao_validar.configure(state="normal")
+                    return
+
+                if not extracao["sucesso"]:
+                    lbl_status.configure(text=extracao["mensagem"], fg="#F87171")
+                    botao_validar.configure(state="normal")
+                    return
+
+                sucesso, dados, mensagem = self.db.autenticar_login_biometrico(
+                    usuario["numero_conta"],
+                    extracao["embedding"]
+                )
+                if not sucesso or dados is None:
+                    lbl_status.configure(text=mensagem, fg="#F87171")
+                    botao_validar.configure(state="normal")
+                    return
+
+                estado["ativo"] = False
+                self.pipeline.liberar_camera()
+                modal.destroy()
+                self.usuario_logado = dados
+                self.exibir_painel_bancario()
+
+            botoes = tk.Frame(modal, bg="#1E293B")
+            botoes.pack(pady=(0, 12))
+            botao_validar = tk.Button(
+                botoes,
+                text="VALIDAR IDENTIDADE",
+                font=("Arial", 10, "bold"),
+                bg="#16A34A",
+                fg="white",
+                padx=18,
+                pady=8,
+                bd=0,
+                cursor="hand2",
+                command=validar_rosto
+            )
+            botao_validar.pack(side="left", padx=5)
+
+            tk.Button(
+                botoes,
+                text="Voltar",
+                font=("Arial", 10),
+                bg="#475569",
+                fg="white",
+                padx=18,
+                pady=8,
+                bd=0,
+                cursor="hand2",
+                command=fechar_modal
+            ).pack(side="left", padx=5)
+
+            atualizar_preview()
+
+        tk.Button(
+            container, text="ENTRAR COM BIOMETRIA FACIAL", font=("Arial", 10, "bold"),
+            bg="#059669", fg="white", activebackground="#047857", cursor="hand2",
+            width=32, pady=8, bd=0, command=iniciar_login_biometrico
         ).pack(pady=(0, 12))
 
         tk.Button(
@@ -176,7 +330,7 @@ class SistemaBancarioApp:
 
         lbl_status_bio = tk.Label(
             col_esq,
-            text="Capture 3 amostras faciais para gerar o centroide de 128 dimensões. Nenhuma foto será armazenada (LGPD).",
+            text="Aguarde o quadro verde no rosto e clique em 'Coletar 3 Amostras (Auto)' ou 'Capturar 1 Amostra'.",
             font=("Arial", 9),
             bg="#0F172A",
             fg="#FBBF24",
@@ -193,70 +347,85 @@ class SistemaBancarioApp:
         col_dir = tk.Frame(frame_principal, bg="#1E293B", padx=20, pady=20)
         col_dir.pack(side="right", fill="both", expand=True)
 
-        tk.Label(col_dir, text="Sensor Óptico 640x480 (Privacidade por Design - RNF-03)", font=("Arial", 11, "bold"), bg="#1E293B", fg="#E2E8F0").pack(pady=(0, 6))
-        lbl_luz = tk.Label(col_dir, text="Analisando iluminação...", font=("Arial", 9), bg="#1E293B", fg="#94A3B8")
+        tk.Label(col_dir, text="Sensor Óptico 640x480 (Privacidade por Design - RNF-03)", font=("Arial", 11, "bold"), bg="#1E293B", fg="#E2E8F0").pack(pady=(0, 4))
+        lbl_luz = tk.Label(col_dir, text="Inicializando câmera...", font=("Arial", 9, "bold"), bg="#1E293B", fg="#94A3B8")
         lbl_luz.pack(pady=(0, 6))
 
-        lbl_video = tk.Label(col_dir, bg="#000000", width=460, height=345)
+        lbl_video = tk.Label(col_dir, bg="#000000", width=460, height=340)
         lbl_video.pack(pady=4)
 
-        camera_ativa = {"rodando": True}
-        ultimo_frame = {"bgr": None}
+        estado_cam = {
+            "rodando": True,
+            "ultimo_frame": None,
+            "roi_atual": None,
+            "ticks": 0,
+            "auto_coletando": False
+        }
 
-        if not self.pipeline.iniciar_camera():
-            messagebox.showerror("Erro de Hardware", "Não foi possível inicializar a webcam.")
-            self.exibir_tela_login()
-            return
+        cam_ok = self.pipeline.iniciar_camera()
+        if not cam_ok:
+            lbl_luz.configure(text="Webcam não detectada. Use 'Carregar Foto (Arquivo)' abaixo.", fg="#F87171")
 
         def atualizar_preview():
-            if not camera_ativa["rodando"]:
+            if not estado_cam["rodando"]:
                 return
-            ok, frame = self.pipeline.capturar_frame()
-            if ok and frame is not None:
-                ultimo_frame["bgr"] = frame.copy()
-                _, status_luz = self.pipeline.avaliar_iluminacao(frame)
-                lbl_luz.configure(text=f"Qualidade Óptica: {status_luz}")
+            if cam_ok:
+                ok, frame = self.pipeline.capturar_frame()
+                if ok and frame is not None:
+                    estado_cam["ultimo_frame"] = frame
+                    estado_cam["ticks"] += 1
 
-                frame_exibicao = cv2.resize(frame, (460, 345))
-                cv2.rectangle(frame_exibicao, (130, 50), (330, 295), (56, 189, 248), 2)
-                img_tk = ImageTk.PhotoImage(image=Image.fromarray(cv2.cvtColor(frame_exibicao, cv2.COLOR_BGR2RGB)))
-                lbl_video.imgtk = img_tk
-                lbl_video.configure(image=img_tk)
-            self.root.after(20, atualizar_preview)
+                    # Rastreia rosto ao vivo a cada 6 frames para dar retorno visual imediato
+                    if estado_cam["ticks"] % 6 == 0:
+                        estado_cam["roi_atual"] = self.pipeline.rastrear_rosto_rapido(frame)
+                        _, status_luz = self.pipeline.avaliar_iluminacao(frame)
+                        if estado_cam["roi_atual"] is not None:
+                            lbl_luz.configure(text=f"ROSTO DETECTADO (Pronto) | {status_luz}", fg="#4ADE80")
+                        else:
+                            lbl_luz.configure(text=f"Aguardando rosto no quadro | {status_luz}", fg="#FBBF24")
+
+                    frame_vis = frame.copy()
+                    if estado_cam["roi_atual"] is not None:
+                        t, r, b, l = estado_cam["roi_atual"]
+                        cv2.rectangle(frame_vis, (l, t), (r, b), (74, 222, 128), 3)
+                    else:
+                        cv2.rectangle(frame_vis, (180, 70), (460, 410), (56, 189, 248), 2)
+
+                    frame_exibicao = cv2.resize(frame_vis, (460, 340))
+                    img_tk = ImageTk.PhotoImage(image=Image.fromarray(cv2.cvtColor(frame_exibicao, cv2.COLOR_BGR2RGB)))
+                    lbl_video.imgtk = img_tk
+                    lbl_video.configure(image=img_tk)
+            self.root.after(25, atualizar_preview)
 
         atualizar_preview()
 
-        def capturar_amostra():
-            if ultimo_frame["bgr"] is None:
-                return
+        def processar_frame_amostra(frame_bgr: np.ndarray) -> bool:
             if len(amostras_embeddings) >= 3:
-                messagebox.showinfo("Cadastro Pronto", "As 3 amostras já foram coletadas. Clique em Concluir Cadastro.")
-                return
+                return True
 
-            lbl_status_bio.configure(text="Extraindo 68 marcos faciais e vetor 128D...", fg="#38BDF8")
-            self.root.update()
+            lbl_status_bio.configure(text="Extraindo 68 marcos faciais e vetor 128D (ResNet-34)...", fg="#38BDF8")
+            self.root.update_idletasks()
 
-            resultado = self.pipeline.extrair_caracteristicas_completas(ultimo_frame["bgr"])
+            resultado = self.pipeline.extrair_caracteristicas_completas(frame_bgr)
             if not resultado["sucesso"]:
                 lbl_status_bio.configure(text=resultado["mensagem"], fg="#F87171")
-                return
+                return False
 
             frame_hud = self.pipeline.desenhar_hud_biometrico(
-                ultimo_frame["bgr"], resultado["roi"], resultado["landmarks"]
+                frame_bgr, resultado["roi"], resultado["landmarks"]
             )
-            exibicao = cv2.resize(frame_hud, (460, 345))
+            exibicao = cv2.resize(frame_hud, (460, 340))
             img_tk = ImageTk.PhotoImage(image=Image.fromarray(cv2.cvtColor(exibicao, cv2.COLOR_BGR2RGB)))
             lbl_video.imgtk = img_tk
             lbl_video.configure(image=img_tk)
 
-            ultimo_frame["bgr"] = None
             amostras_embeddings.append(resultado["embedding"])
             qtd = len(amostras_embeddings)
             lbl_progresso.configure(text=f"Amostras Biométricas Coletadas: {qtd} / 3")
 
             if qtd < 3:
                 lbl_status_bio.configure(
-                    text=f"Amostra {qtd}/3 capturada! Mova levemente o ângulo do rosto e capture a próxima.",
+                    text=f"Amostra {qtd}/3 coletada com sucesso! Capturando próxima...",
                     fg="#4ADE80"
                 )
             else:
@@ -271,6 +440,55 @@ class SistemaBancarioApp:
                     amostras_embeddings.clear()
                     lbl_progresso.configure(text="Amostras Biométricas Coletadas: 0 / 3")
                     lbl_status_bio.configure(text=msg_cons, fg="#F87171")
+                    return False
+            return True
+
+        def capturar_manual():
+            if estado_cam["ultimo_frame"] is None:
+                messagebox.showwarning("Sem Quadro", "Aguarde a imagem da câmera estabilizar ou carregue uma foto.")
+                return
+            processar_frame_amostra(estado_cam["ultimo_frame"].copy())
+
+        def iniciar_coleta_automatica():
+            if estado_cam["ultimo_frame"] is None:
+                messagebox.showwarning("Sem Quadro", "Webcam indisponível. Use o botão 'Carregar Foto'.")
+                return
+            if len(amostras_embeddings) >= 3:
+                messagebox.showinfo("Concluído", "As 3 amostras já foram coletadas!")
+                return
+            estado_cam["auto_coletando"] = True
+
+            def passo_auto():
+                if not estado_cam["rodando"] or not estado_cam["auto_coletando"]:
+                    return
+                if len(amostras_embeddings) >= 3:
+                    estado_cam["auto_coletando"] = False
+                    return
+                if estado_cam["ultimo_frame"] is not None:
+                    processar_frame_amostra(estado_cam["ultimo_frame"].copy())
+                if len(amostras_embeddings) < 3:
+                    self.root.after(650, passo_auto)
+                else:
+                    estado_cam["auto_coletando"] = False
+
+            passo_auto()
+
+        def carregar_foto_arquivo():
+            caminho = filedialog.askopenfilename(
+                title="Selecione uma foto frontal nítida",
+                filetypes=[("Imagens", "*.jpg *.jpeg *.png *.bmp")]
+            )
+            if not caminho:
+                return
+            img = cv2.imread(caminho)
+            if img is None:
+                messagebox.showerror("Erro", "Não foi possível ler a imagem selecionada.")
+                return
+            img = cv2.resize(img, (640, 480))
+            amostras_embeddings.clear()
+            for _ in range(3):
+                if not processar_frame_amostra(img):
+                    break
 
         def finalizar_cadastro():
             nome = entry_nome.get().strip()
@@ -292,7 +510,7 @@ class SistemaBancarioApp:
 
             sucesso, msg = self.db.cadastrar_usuario(nome, conta, senha, vetor_consolidado["embedding"], saldo)
             if sucesso:
-                camera_ativa["rodando"] = False
+                estado_cam["rodando"] = False
                 self.pipeline.liberar_camera()
                 messagebox.showinfo("Cadastro Concluído", msg)
                 self.exibir_tela_login()
@@ -300,24 +518,25 @@ class SistemaBancarioApp:
                 messagebox.showerror("Erro no Cadastro", msg)
 
         botoes_cam = tk.Frame(col_dir, bg="#1E293B")
-        botoes_cam.pack(pady=(12, 0))
+        botoes_cam.pack(pady=(10, 0))
 
         tk.Button(
-            botoes_cam, text="CAPTURAR AMOSTRA FACIAL", font=("Arial", 10, "bold"),
-            bg="#0EA5E9", fg="white", pady=8, padx=16, bd=0, cursor="hand2",
-            command=capturar_amostra
-        ).pack(side="left", padx=5)
+            botoes_cam, text="COLETAR 3 AMOSTRAS (AUTO)", font=("Arial", 9, "bold"),
+            bg="#16A34A", fg="white", pady=8, padx=10, bd=0, cursor="hand2",
+            command=iniciar_coleta_automatica
+        ).pack(side="left", padx=4)
 
         tk.Button(
-            botoes_cam, text="Limpar Amostras", font=("Arial", 10),
-            bg="#475569", fg="white", pady=8, padx=12, bd=0, cursor="hand2",
-            command=lambda: [
-                amostras_embeddings.clear(),
-                vetor_consolidado.update({"embedding": None}),
-                lbl_progresso.configure(text="Amostras Biométricas Coletadas: 0 / 3"),
-                lbl_status_bio.configure(text="Amostras zeradas. Capture 3 novas amostras.", fg="#FBBF24")
-            ]
-        ).pack(side="left", padx=5)
+            botoes_cam, text="Capturar 1 Amostra", font=("Arial", 9, "bold"),
+            bg="#0EA5E9", fg="white", pady=8, padx=10, bd=0, cursor="hand2",
+            command=capturar_manual
+        ).pack(side="left", padx=4)
+
+        tk.Button(
+            botoes_cam, text="Carregar Foto", font=("Arial", 9),
+            bg="#475569", fg="white", pady=8, padx=10, bd=0, cursor="hand2",
+            command=carregar_foto_arquivo
+        ).pack(side="left", padx=4)
 
         tk.Button(
             col_esq, text="CONCLUIR CADASTRO", font=("Arial", 11, "bold"),
@@ -328,7 +547,7 @@ class SistemaBancarioApp:
         tk.Button(
             col_esq, text="Voltar ao Login", font=("Arial", 10),
             bg="#334155", fg="white", pady=7, bd=0, cursor="hand2",
-            command=lambda: [camera_ativa.update({"rodando": False}), self.exibir_tela_login()]
+            command=lambda: [estado_cam.update({"rodando": False}), self.exibir_tela_login()]
         ).pack(fill="x")
 
     # =========================================================================
@@ -337,7 +556,7 @@ class SistemaBancarioApp:
     def abrir_modal_vincular_biometria(self, callback_apos_cadastro=None):
         modal = tk.Toplevel(self.root)
         modal.title("Cadastro de Template Biométrico 128D (LGPD)")
-        modal.geometry("580x580")
+        modal.geometry("600x600")
         modal.configure(bg="#1E293B")
         modal.transient(self.root)
         modal.grab_set()
@@ -353,39 +572,54 @@ class SistemaBancarioApp:
 
         lbl_progresso = tk.Label(
             modal,
-            text="Amostras Coletadas: 0 / 3  (Capture 3 ângulos leves do seu rosto)",
+            text="Amostras Coletadas: 0 / 3  (Aguarde o retângulo verde no rosto)",
             font=("Arial", 10, "bold"),
             bg="#1E293B",
             fg="#38BDF8",
-            pady=8
+            pady=6
         )
         lbl_progresso.pack()
 
-        lbl_cam = tk.Label(modal, bg="#000000", width=460, height=330)
+        lbl_rastreio = tk.Label(
+            modal,
+            text="Inicializando sensor óptico...",
+            font=("Arial", 9, "bold"),
+            bg="#1E293B",
+            fg="#94A3B8"
+        )
+        lbl_rastreio.pack(pady=(0, 4))
+
+        lbl_cam = tk.Label(modal, bg="#000000", width=460, height=320)
         lbl_cam.pack(pady=4)
 
         lbl_status = tk.Label(
             modal,
-            text="Posicione seu rosto no quadro e clique em 'Capturar Amostra'.",
+            text="Clique em 'Coletar 3 Amostras (Auto)' ou 'Capturar 1 Amostra' para registrar seu vetor 128D.",
             font=("Arial", 9, "bold"),
             bg="#0F172A",
             fg="#FBBF24",
             pady=10,
             padx=12,
-            wraplength=500
+            wraplength=520
         )
-        lbl_status.pack(fill="x", padx=30, pady=10)
+        lbl_status.pack(fill="x", padx=30, pady=8)
 
-        if not self.pipeline.iniciar_camera():
-            messagebox.showerror("Erro de Câmera", "Não foi possível abrir a webcam.", parent=modal)
-            modal.destroy()
-            return
+        cam_ok = self.pipeline.iniciar_camera()
+        if not cam_ok:
+            lbl_rastreio.configure(text="Webcam indisponível. Use 'Carregar Foto (Arquivo)' abaixo.", fg="#F87171")
 
-        estado = {"ativo": True, "frame_atual": None}
+        estado = {
+            "ativo": True,
+            "frame_atual": None,
+            "roi_atual": None,
+            "ticks": 0,
+            "auto_coletando": False
+        }
         amostras: List[np.ndarray] = []
 
         def fechar():
             estado["ativo"] = False
+            estado["auto_coletando"] = False
             self.pipeline.liberar_camera()
             modal.destroy()
 
@@ -394,73 +628,150 @@ class SistemaBancarioApp:
         def loop_preview():
             if not estado["ativo"]:
                 return
-            ok, frame = self.pipeline.capturar_frame()
-            if ok and frame is not None:
-                estado["frame_atual"] = frame.copy()
-                exib = cv2.resize(frame, (460, 330))
-                cv2.rectangle(exib, (130, 45), (330, 285), (56, 189, 248), 2)
-                img_tk = ImageTk.PhotoImage(image=Image.fromarray(cv2.cvtColor(exib, cv2.COLOR_BGR2RGB)))
-                lbl_cam.imgtk = img_tk
-                lbl_cam.configure(image=img_tk)
-            modal.after(20, loop_preview)
+            if cam_ok:
+                ok, frame = self.pipeline.capturar_frame()
+                if ok and frame is not None:
+                    estado["frame_atual"] = frame
+                    estado["ticks"] += 1
 
-        def capturar():
-            if estado["frame_atual"] is None:
-                return
+                    if estado["ticks"] % 6 == 0:
+                        estado["roi_atual"] = self.pipeline.rastrear_rosto_rapido(frame)
+                        if estado["roi_atual"] is not None:
+                            lbl_rastreio.configure(text="ROSTO DETECTADO (Pronto para capturar)", fg="#4ADE80")
+                        else:
+                            lbl_rastreio.configure(text="Posicione seu rosto frente à câmera...", fg="#FBBF24")
 
-            lbl_status.configure(text="Extraindo 68 marcos faciais (ResNet-34)...", fg="#38BDF8")
-            modal.update()
+                    frame_vis = frame.copy()
+                    if estado["roi_atual"] is not None:
+                        t, r, b, l = estado["roi_atual"]
+                        cv2.rectangle(frame_vis, (l, t), (r, b), (74, 222, 128), 3)
+                    else:
+                        cv2.rectangle(frame_vis, (180, 70), (460, 410), (56, 189, 248), 2)
 
-            res = self.pipeline.extrair_caracteristicas_completas(estado["frame_atual"])
+                    exib = cv2.resize(frame_vis, (460, 320))
+                    img_tk = ImageTk.PhotoImage(image=Image.fromarray(cv2.cvtColor(exib, cv2.COLOR_BGR2RGB)))
+                    lbl_cam.imgtk = img_tk
+                    lbl_cam.configure(image=img_tk)
+            modal.after(25, loop_preview)
+
+        def processar_amostra_modal(frame_bgr: np.ndarray) -> bool:
+            lbl_status.configure(text="Extraindo 68 marcos faciais e embedding 128D (ResNet-34)...", fg="#38BDF8")
+            modal.update_idletasks()
+
+            res = self.pipeline.extrair_caracteristicas_completas(frame_bgr)
             if not res["sucesso"]:
                 lbl_status.configure(text=res["mensagem"], fg="#F87171")
-                return
+                return False
 
             frame_hud = self.pipeline.desenhar_hud_biometrico(
-                estado["frame_atual"], res["roi"], res["landmarks"]
+                frame_bgr, res["roi"], res["landmarks"]
             )
-            exib = cv2.resize(frame_hud, (460, 330))
+            exib = cv2.resize(frame_hud, (460, 320))
             img_tk = ImageTk.PhotoImage(image=Image.fromarray(cv2.cvtColor(exib, cv2.COLOR_BGR2RGB)))
             lbl_cam.imgtk = img_tk
             lbl_cam.configure(image=img_tk)
 
-            # Descarta frame bruto da RAM imediatamente (RNF-03)
-            estado["frame_atual"] = None
             amostras.append(res["embedding"])
             qtd = len(amostras)
             lbl_progresso.configure(text=f"Amostras Coletadas: {qtd} / 3")
 
             if qtd < 3:
                 lbl_status.configure(
-                    text=f"Amostra {qtd}/3 registrada! Mova levemente o rosto e capture a próxima.",
+                    text=f"Amostra {qtd}/3 registrada! Mova levemente o ângulo do rosto...",
                     fg="#4ADE80"
                 )
-            else:
-                ok_cons, centroide, msg_cons = self.pipeline.consolidar_centroide_cadastro(amostras)
-                if not ok_cons:
-                    amostras.clear()
-                    lbl_progresso.configure(text="Amostras Coletadas: 0 / 3")
-                    lbl_status.configure(text=msg_cons, fg="#F87171")
-                    return
+                return True
 
-                ok_db, msg_db = self.db.atualizar_biometria_usuario(
-                    self.usuario_logado["numero_conta"], centroide
+            # Consolidando o centroide após 3 amostras
+            ok_cons, centroide, msg_cons = self.pipeline.consolidar_centroide_cadastro(amostras)
+            if not ok_cons:
+                amostras.clear()
+                lbl_progresso.configure(text="Amostras Coletadas: 0 / 3")
+                lbl_status.configure(text=msg_cons, fg="#F87171")
+                return False
+
+            ok_db, msg_db = self.db.atualizar_biometria_usuario(
+                self.usuario_logado["numero_conta"], centroide
+            )
+            fechar()
+            if ok_db:
+                self.usuario_logado = self.db.obter_dados_atualizados(self.usuario_logado["numero_conta"])
+                messagebox.showinfo(
+                    "Biometria Ativa",
+                    f"{msg_db}\n{msg_cons}\nNenhuma foto bruta foi salva no banco (LGPD)."
                 )
-                fechar()
-                if ok_db:
-                    self.usuario_logado = self.db.obter_dados_atualizados(self.usuario_logado["numero_conta"])
-                    messagebox.showinfo("Biometria Ativa", f"{msg_db}\nNenhuma imagem foi salva no banco (LGPD).")
-                    self.exibir_painel_bancario()
-                    if callback_apos_cadastro:
-                        callback_apos_cadastro()
+                self.exibir_painel_bancario()
+                if callback_apos_cadastro:
+                    callback_apos_cadastro()
+            else:
+                messagebox.showerror("Erro", msg_db)
+            return True
+
+        def capturar_uma():
+            if estado["frame_atual"] is None:
+                messagebox.showwarning("Sem Quadro", "Webcam indisponível. Use 'Carregar Foto'.", parent=modal)
+                return
+            processar_amostra_modal(estado["frame_atual"].copy())
+
+        def coletar_tres_auto():
+            if estado["frame_atual"] is None:
+                messagebox.showwarning("Sem Quadro", "Webcam indisponível. Use 'Carregar Foto'.", parent=modal)
+                return
+            estado["auto_coletando"] = True
+
+            def passo():
+                if not estado["ativo"] or not estado["auto_coletando"]:
+                    return
+                if len(amostras) >= 3:
+                    estado["auto_coletando"] = False
+                    return
+                if estado["frame_atual"] is not None:
+                    processar_amostra_modal(estado["frame_atual"].copy())
+                if estado["ativo"] and len(amostras) < 3:
+                    modal.after(650, passo)
                 else:
-                    messagebox.showerror("Erro", msg_db)
+                    estado["auto_coletando"] = False
+
+            passo()
+
+        def carregar_foto_modal():
+            caminho = filedialog.askopenfilename(
+                parent=modal,
+                title="Selecione uma foto de referência nítida",
+                filetypes=[("Imagens", "*.jpg *.jpeg *.png *.bmp")]
+            )
+            if not caminho:
+                return
+            img = cv2.imread(caminho)
+            if img is None:
+                messagebox.showerror("Erro", "Falha ao abrir imagem.", parent=modal)
+                return
+            img = cv2.resize(img, (640, 480))
+            amostras.clear()
+            for _ in range(3):
+                if not processar_amostra_modal(img):
+                    break
+
+        frame_btns = tk.Frame(modal, bg="#1E293B")
+        frame_btns.pack(pady=(2, 8))
 
         tk.Button(
-            modal, text="CAPTURAR AMOSTRA FACIAL", font=("Arial", 10, "bold"),
-            bg="#16A34A", fg="white", pady=9, width=36, bd=0, cursor="hand2",
-            command=capturar
-        ).pack(pady=(2, 8))
+            frame_btns, text="COLETAR 3 AMOSTRAS (AUTO)", font=("Arial", 9, "bold"),
+            bg="#16A34A", fg="white", pady=9, padx=12, bd=0, cursor="hand2",
+            command=coletar_tres_auto
+        ).pack(side="left", padx=4)
+
+        tk.Button(
+            frame_btns, text="Capturar 1 Amostra", font=("Arial", 9, "bold"),
+            bg="#0EA5E9", fg="white", pady=9, padx=12, bd=0, cursor="hand2",
+            command=capturar_uma
+        ).pack(side="left", padx=4)
+
+        tk.Button(
+            frame_btns, text="Carregar Foto", font=("Arial", 9),
+            bg="#475569", fg="white", pady=9, padx=12, bd=0, cursor="hand2",
+            command=carregar_foto_modal
+        ).pack(side="left", padx=4)
 
         loop_preview()
 
@@ -472,7 +783,6 @@ class SistemaBancarioApp:
         self.usuario_logado = self.db.obter_dados_atualizados(self.usuario_logado["numero_conta"])
         bio_ativa = self.usuario_logado["biometria_cadastrada"]
 
-        # Cabeçalho
         header = tk.Frame(self.root, bg="#1E293B", height=65, padx=22)
         header.pack(fill="x")
         header.pack_propagate(False)
@@ -511,7 +821,6 @@ class SistemaBancarioApp:
         topo_cards = tk.Frame(corpo, bg="#0F172A")
         topo_cards.pack(fill="x", pady=(0, 18))
 
-        # Card Esquerdo: Saldo + Status Biométrico + Matriz dos 3 Níveis
         card_saldo = tk.Frame(topo_cards, bg="#1E293B", padx=22, pady=16, width=375, height=255)
         card_saldo.pack(side="left", fill="y", padx=(0, 15))
         card_saldo.pack_propagate(False)
@@ -545,7 +854,6 @@ class SistemaBancarioApp:
             justify="left"
         ).pack(fill="x")
 
-        # Card Direito: Formulário de Transferência / Acesso ao Cofre
         card_transf = tk.Frame(topo_cards, bg="#1E293B", padx=22, pady=16, height=255)
         card_transf.pack(side="right", fill="both", expand=True)
         card_transf.pack_propagate(False)
@@ -557,7 +865,7 @@ class SistemaBancarioApp:
 
         frame_dest = tk.Frame(linha_inputs, bg="#1E293B")
         frame_dest.pack(side="left", fill="x", expand=True, padx=(0, 15))
-        tk.Label(frame_dest, text="Conta Destino (9999-0 Padrão | 8888-0 Cofre):", font=("Arial", 10), bg="#1E293B", fg="#E2E8F0").pack(anchor="w")
+        tk.Label(frame_dest, text="Chave Pix (nome do usuário ou número da conta):", font=("Arial", 10), bg="#1E293B", fg="#E2E8F0").pack(anchor="w")
         entry_destino = tk.Entry(frame_dest, font=("Arial", 12), bg="#0F172A", fg="white", insertbackground="white")
         entry_destino.insert(0, "8888-0")
         entry_destino.pack(fill="x", pady=(4, 0), ipady=5)
@@ -580,11 +888,13 @@ class SistemaBancarioApp:
         def atualizar_classificacao_risco(*args):
             texto = entry_valor.get().replace(",", ".").strip()
             dest = entry_destino.get().strip()
+            destino_encontrado, conta_destino, _ = self.db.resolver_destinatario(dest)
+            destino_cofre = destino_encontrado and conta_destino == self.CONTA_COFRE_CENTRAL
             try:
                 v = float(texto)
                 if v <= 0:
                     lbl_indicador_risco.configure(text="Valor inválido.", fg="#F87171")
-                elif v >= self.LIMITE_NIVEL_3_COFRE_MAXIMO or dest == self.CONTA_COFRE_CENTRAL:
+                elif v >= self.LIMITE_NIVEL_3_COFRE_MAXIMO or destino_cofre:
                     lbl_indicador_risco.configure(
                         text="NÍVEL 3 (COFRE MÁXIMO): Exige Facial 1:1 + Piscada Ocular (EAR) + Senha.",
                         fg="#F87171"
@@ -623,19 +933,22 @@ class SistemaBancarioApp:
                 messagebox.showerror("Saldo Insuficiente", "Saldo insuficiente para esta operação.")
                 return
 
-            existe, nome_dest = self.db.validar_destinatario(destino)
-            if not existe or destino == self.usuario_logado["numero_conta"]:
-                messagebox.showerror("Conta Inválida", "Conta de destino inexistente ou igual à conta de origem.")
+            existe, conta_destino, nome_dest = self.db.resolver_destinatario(destino)
+            if not existe or conta_destino is None or conta_destino == self.usuario_logado["numero_conta"]:
+                messagebox.showerror(
+                    "Destinatário Inválido",
+                    "Não foi possível localizar um destinatário único por esse nome/conta, "
+                    "ou a chave Pix corresponde à sua própria conta."
+                )
                 return
 
-            # Define o nível de segurança
-            exige_nivel_3 = (valor >= self.LIMITE_NIVEL_3_COFRE_MAXIMO) or (destino == self.CONTA_COFRE_CENTRAL)
+            exige_nivel_3 = (valor >= self.LIMITE_NIVEL_3_COFRE_MAXIMO) or (conta_destino == self.CONTA_COFRE_CENTRAL)
             exige_nivel_2 = (valor >= self.LIMITE_NIVEL_2_BIOMETRIA)
 
             if not exige_nivel_2 and not exige_nivel_3:
                 sucesso, msg = self.db.executar_transferencia(
                     conta_origem=self.usuario_logado["numero_conta"],
-                    conta_destino=destino,
+                    conta_destino=conta_destino,
                     valor=valor,
                     nivel_seguranca="Nível 1 (< R$ 1k)",
                     exigiu_biometria=False
@@ -647,7 +960,6 @@ class SistemaBancarioApp:
                     messagebox.showerror("Erro", msg)
                 return
 
-            # Verifica se o usuário já vinculou seu vetor facial 128D
             nivel_alvo = 3 if exige_nivel_3 else 2
             if not self.usuario_logado["biometria_cadastrada"]:
                 quer_cadastrar = messagebox.askyesno(
@@ -656,11 +968,11 @@ class SistemaBancarioApp:
                 )
                 if quer_cadastrar:
                     self.abrir_modal_vincular_biometria(
-                        callback_apos_cadastro=lambda: self.abrir_modal_validacao_facial(destino, nome_dest, valor, nivel=nivel_alvo)
+                        callback_apos_cadastro=lambda: self.abrir_modal_validacao_facial(conta_destino, nome_dest, valor, nivel=nivel_alvo)
                     )
                 return
 
-            self.abrir_modal_validacao_facial(destino, nome_dest, valor, nivel=nivel_alvo)
+            self.abrir_modal_validacao_facial(conta_destino, nome_dest, valor, nivel=nivel_alvo)
 
         tk.Button(
             card_transf, text="EXECUTAR TRANSFERÊNCIA / ACESSAR COFRE", font=("Arial", 11, "bold"),
@@ -668,7 +980,6 @@ class SistemaBancarioApp:
             command=iniciar_fluxo_transferencia
         ).pack(fill="x")
 
-        # Barra do Extrato + Filtros + Exportação CSV
         barra_extrato = tk.Frame(corpo, bg="#0F172A")
         barra_extrato.pack(fill="x", pady=(0, 8))
 
@@ -764,7 +1075,7 @@ class SistemaBancarioApp:
         instrucao = (
             f"Destinatário: {nome_dest} ({conta_destino})\n"
             + ("Posicione o rosto e clique em Validar." if nivel == 2
-               else "Cofre Máximo: Pisque os olhos diante da câmera (Prova de Vida) e confirme sua senha (1234).")
+               else "Cofre Máximo: Pisque diante da câmera (Prova de Vida) e confirme sua senha de acesso.")
         )
         tk.Label(modal, text=instrucao, font=("Arial", 10), bg="#1E293B", fg="#E2E8F0", pady=8).pack()
 
@@ -823,15 +1134,15 @@ class SistemaBancarioApp:
                 return
             ok, frame = self.pipeline.capturar_frame()
             if ok and frame is not None:
-                estado["frame_atual"] = frame.copy()
+                estado["frame_atual"] = frame
                 estado["contador_frames"] += 1
                 exibicao = frame.copy()
 
                 if nivel == 3 and not estado_liveness["piscada_detectada"] and estado["contador_frames"] % 3 == 0:
-                    frame_rgb, _ = self.pipeline.preprocessar_frame(frame)
-                    locs = self.pipeline.detectar_rostos(frame_rgb)
+                    rgb_nat, rgb_red, bgr_eq = self.pipeline.preprocessar_frame(frame)
+                    locs, rgb_usado = self.pipeline.detectar_rostos_adaptativo(rgb_nat, rgb_red, bgr_eq)
                     if len(locs) == 1:
-                        lms = face_recognition.face_landmarks(frame_rgb, face_locations=locs)
+                        lms = face_recognition.face_landmarks(rgb_usado, face_locations=locs)
                         if lms:
                             ear = self.pipeline.calcular_liveness_ear(lms[0])
                             estado_liveness["ear_atual"] = ear
@@ -846,7 +1157,7 @@ class SistemaBancarioApp:
                 img_tk = ImageTk.PhotoImage(image=Image.fromarray(cv2.cvtColor(exibicao, cv2.COLOR_BGR2RGB)))
                 lbl_cam.imgtk = img_tk
                 lbl_cam.configure(image=img_tk)
-            modal.after(20, loop_camera)
+            modal.after(25, loop_camera)
 
         def executar_matching():
             if not estado["ativo"] or estado["frame_atual"] is None:
@@ -865,14 +1176,14 @@ class SistemaBancarioApp:
                     return
 
             lbl_feedback.configure(text="Executando pipeline ResNet-34 (68 marcos + embedding 128D)...", fg="#FBBF24")
-            modal.update()
+            modal.update_idletasks()
 
             resultado = self.pipeline.verificar_identidade(
-                frame_bgr=estado["frame_atual"],
+                frame_bgr=estado["frame_atual"].copy(),
                 embedding_cadastrado=self.usuario_logado["embedding"]
             )
 
-            cor_box = (0, 255, 0) if resultado["aprovado"] else (0, 0, 255)
+            cor_box = (74, 222, 128) if resultado["aprovado"] else (0, 0, 255)
             frame_anotado = self.pipeline.desenhar_hud_biometrico(
                 estado["frame_atual"], resultado["roi"], resultado["landmarks"], cor_bgr=cor_box
             )

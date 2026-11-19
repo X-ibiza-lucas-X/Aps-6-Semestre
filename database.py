@@ -12,6 +12,7 @@ from typing import Optional, Tuple, List, Dict
 class BancoDados:
     MAX_TENTATIVAS_LOGIN = 3
     MINUTOS_BLOQUEIO_LOGIN = 2
+    LIMIAR_DISTANCIA_LOGIN_BIOMETRICO = 0.55
 
     def __init__(self, db_path: str = "sistema_bancario_unip.db"):
         self.db_path = db_path
@@ -84,15 +85,15 @@ class BancoDados:
 
     def _criar_contas_grupo_e_cofre(self):
         """
-        Cria automaticamente os 5 integrantes do grupo (ETP) com senha '1234'
+        Cria ou atualiza as 5 contas dos integrantes com senha inicial '234'
         e as contas destinatárias (Conta Padrão e Cofre Central Nível 3).
         """
         integrantes_grupo = [
-            ("Gustavo Henrique Sousa da Silva", "1001-0", "gustavo", "1234", 25000.00),
-            ("Higor Fernandes dos Santos Moreira", "1002-0", "higor", "1234", 25000.00),
-            ("LUCAS SILVA SABINO", "1003-0", "lucas", "1234", 25000.00),
-            ("Moisés Paixão Pereira", "1004-0", "moises", "1234", 25000.00),
-            ("Guilherme Silva Tavares", "1005-0", "guilherme", "1234", 25000.00),
+            ("Gustavo", "1001-0", "gustavo", 25000.00),
+            ("Igor", "1002-0", "igor", 25000.00),
+            ("Lucas", "1003-0", "lucas", 25000.00),
+            ("Moisés", "1004-0", "moises", 25000.00),
+            ("Guilherme", "1005-0", "guilherme", 25000.00),
         ]
 
         contas_sistema = [
@@ -102,7 +103,46 @@ class BancoDados:
 
         with self._conectar() as conn:
             cursor = conn.cursor()
-            for nome, conta, alias, senha_plana, saldo in integrantes_grupo + contas_sistema:
+            for nome, conta, alias, saldo in integrantes_grupo:
+                cursor.execute("SELECT id FROM usuarios WHERE numero_conta = ?", (conta,))
+                usuario = cursor.fetchone()
+                cursor.execute(
+                    "SELECT numero_conta FROM usuarios WHERE login_alias = ? AND numero_conta != ?",
+                    (alias, conta)
+                )
+                if cursor.fetchone():
+                    raise sqlite3.IntegrityError(f"O identificador de login '{alias}' já está em uso.")
+
+                if not usuario:
+                    senha_hash = bcrypt.hashpw(b"234", bcrypt.gensalt(rounds=12))
+                    vetor_json = json.dumps([0.0] * 128)
+                    checksum = self._gerar_checksum_vetor(vetor_json)
+                    cursor.execute("""
+                        INSERT INTO usuarios (
+                            nome, numero_conta, login_alias, senha_hash, embedding_128d,
+                            embedding_sha256, biometria_cadastrada, saldo, criado_em
+                        ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+                    """, (
+                        nome, conta, alias, senha_hash, vetor_json, checksum, saldo,
+                        datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                    ))
+                    continue
+
+                cursor.execute(
+                    "SELECT nome, login_alias FROM usuarios WHERE numero_conta = ?",
+                    (conta,)
+                )
+                dados_atuais = cursor.fetchone()
+                senha_hash = None
+                if dados_atuais["nome"] != nome or dados_atuais["login_alias"] != alias:
+                    senha_hash = bcrypt.hashpw(b"234", bcrypt.gensalt(rounds=12))
+                cursor.execute("""
+                    UPDATE usuarios
+                    SET nome = ?, login_alias = ?, senha_hash = COALESCE(?, senha_hash)
+                    WHERE numero_conta = ?
+                """, (nome, alias, senha_hash, conta))
+
+            for nome, conta, alias, senha_plana, saldo in contas_sistema:
                 cursor.execute("SELECT id FROM usuarios WHERE numero_conta = ?", (conta,))
                 if not cursor.fetchone():
                     senha_hash = bcrypt.hashpw(senha_plana.encode("utf-8"), bcrypt.gensalt(rounds=12))
@@ -191,11 +231,11 @@ class BancoDados:
     def autenticar_login(self, identificador: str, senha_plana: str) -> Tuple[bool, Optional[Dict], str]:
         """
         Valida credenciais aceitando tanto o número da conta (ex: '1003-0')
-        quanto o primeiro nome do integrante (ex: 'Lucas', 'Higor', 'Igor').
+        quanto o primeiro nome do integrante (ex: 'Lucas', 'Igor').
         """
         chave = self._normalizar_texto(identificador)
-        if chave == "igor":
-            chave = "higor"
+        if chave == "higor":
+            chave = "igor"
 
         with self._conectar() as conn:
             cursor = conn.cursor()
@@ -257,6 +297,132 @@ class BancoDados:
             restantes = self.MAX_TENTATIVAS_LOGIN - novas_falhas
             return False, None, f"Senha incorreta. Restam {restantes} tentativa(s)."
 
+    def obter_usuario_login_biometrico(self, identificador: str) -> Tuple[bool, Optional[Dict], str]:
+        """Valida conta, bloqueio e template antes de iniciar o login facial."""
+        chave = self._normalizar_texto(identificador)
+        if chave == "higor":
+            chave = "igor"
+
+        with self._conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM usuarios
+                WHERE LOWER(numero_conta) = ? OR LOWER(login_alias) = ?
+            """, (chave, chave))
+            usuario = cursor.fetchone()
+            if not usuario:
+                return False, None, "Conta ou usuário não encontrado."
+
+            if usuario["bloqueado_ate"]:
+                limite = datetime.strptime(usuario["bloqueado_ate"], "%Y-%m-%d %H:%M:%S")
+                if datetime.now() < limite:
+                    restante = int((limite - datetime.now()).total_seconds())
+                    return False, None, f"Conta temporariamente bloqueada. Aguarde {restante}s."
+                cursor.execute(
+                    "UPDATE usuarios SET tentativas_falhas = 0, bloqueado_ate = NULL WHERE id = ?",
+                    (usuario["id"],)
+                )
+                conn.commit()
+
+            if self._gerar_checksum_vetor(usuario["embedding_128d"]) != usuario["embedding_sha256"]:
+                return False, None, "Alerta de Integridade: Template biométrico adulterado no banco."
+            if not usuario["biometria_cadastrada"]:
+                return False, None, "Esta conta ainda não possui biometria cadastrada. Entre com senha e cadastre-a no painel."
+
+            try:
+                embedding = np.asarray(json.loads(usuario["embedding_128d"]), dtype=np.float64)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return False, None, "Alerta de Integridade: Template biométrico inválido."
+            if embedding.shape != (128,) or not np.isfinite(embedding).all():
+                return False, None, "Alerta de Integridade: Template biométrico inválido."
+
+            dados = {
+                "id": usuario["id"],
+                "nome": usuario["nome"],
+                "numero_conta": usuario["numero_conta"],
+                "saldo": usuario["saldo"],
+                "biometria_cadastrada": True,
+                "embedding": embedding
+            }
+            return True, dados, "Conta pronta para validação facial."
+
+    def autenticar_login_biometrico(
+        self,
+        numero_conta: str,
+        embedding_capturado: np.ndarray
+    ) -> Tuple[bool, Optional[Dict], str]:
+        """Compara o rosto capturado, registra falhas e aplica o bloqueio de login."""
+        embedding_vivo = np.asarray(embedding_capturado, dtype=np.float64)
+        if embedding_vivo.shape != (128,) or not np.isfinite(embedding_vivo).all():
+            return False, None, "A captura facial não produziu um vetor biométrico válido."
+
+        with self._conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM usuarios WHERE numero_conta = ?", (numero_conta,))
+            usuario = cursor.fetchone()
+            if not usuario:
+                return False, None, "Conta não encontrada."
+
+            if usuario["bloqueado_ate"]:
+                limite = datetime.strptime(usuario["bloqueado_ate"], "%Y-%m-%d %H:%M:%S")
+                if datetime.now() < limite:
+                    restante = int((limite - datetime.now()).total_seconds())
+                    return False, None, f"Conta temporariamente bloqueada. Aguarde {restante}s."
+                cursor.execute(
+                    "UPDATE usuarios SET tentativas_falhas = 0, bloqueado_ate = NULL WHERE id = ?",
+                    (usuario["id"],)
+                )
+                conn.commit()
+
+            if self._gerar_checksum_vetor(usuario["embedding_128d"]) != usuario["embedding_sha256"]:
+                return False, None, "Alerta de Integridade: Template biométrico adulterado no banco."
+            if not usuario["biometria_cadastrada"]:
+                return False, None, "Esta conta ainda não possui biometria cadastrada."
+
+            try:
+                embedding_salvo = np.asarray(json.loads(usuario["embedding_128d"]), dtype=np.float64)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return False, None, "Alerta de Integridade: Template biométrico inválido."
+            if embedding_salvo.shape != (128,) or not np.isfinite(embedding_salvo).all():
+                return False, None, "Alerta de Integridade: Template biométrico inválido."
+
+            distancia = float(np.linalg.norm(embedding_salvo - embedding_vivo))
+            if distancia <= self.LIMIAR_DISTANCIA_LOGIN_BIOMETRICO:
+                cursor.execute(
+                    "UPDATE usuarios SET tentativas_falhas = 0, bloqueado_ate = NULL WHERE id = ?",
+                    (usuario["id"],)
+                )
+                conn.commit()
+                dados = {
+                    "id": usuario["id"],
+                    "nome": usuario["nome"],
+                    "numero_conta": usuario["numero_conta"],
+                    "saldo": usuario["saldo"],
+                    "biometria_cadastrada": True,
+                    "embedding": embedding_salvo
+                }
+                return True, dados, f"Identidade aprovada (distância facial: {distancia:.4f})."
+
+            novas_falhas = usuario["tentativas_falhas"] + 1
+            if novas_falhas >= self.MAX_TENTATIVAS_LOGIN:
+                bloqueio = (
+                    datetime.now() + timedelta(minutes=self.MINUTOS_BLOQUEIO_LOGIN)
+                ).strftime("%Y-%m-%d %H:%M:%S")
+                cursor.execute(
+                    "UPDATE usuarios SET tentativas_falhas = ?, bloqueado_ate = ? WHERE id = ?",
+                    (novas_falhas, bloqueio, usuario["id"])
+                )
+                conn.commit()
+                return False, None, f"Rosto não reconhecido. Conta bloqueada por {self.MINUTOS_BLOQUEIO_LOGIN} min."
+
+            cursor.execute(
+                "UPDATE usuarios SET tentativas_falhas = ? WHERE id = ?",
+                (novas_falhas, usuario["id"])
+            )
+            conn.commit()
+            restantes = self.MAX_TENTATIVAS_LOGIN - novas_falhas
+            return False, None, f"Rosto não reconhecido (distância {distancia:.4f}). Restam {restantes} tentativa(s)."
+
     def verificar_senha_adicional(self, numero_conta: str, senha_plana: str) -> bool:
         """Revalidação de senha exigida para operações críticas do Cofre (Nível 3)."""
         with self._conectar() as conn:
@@ -285,14 +451,36 @@ class BancoDados:
             "embedding": np.array(json.loads(usuario["embedding_128d"]), dtype=np.float64)
         }
 
-    def validar_destinatario(self, conta_destino: str) -> Tuple[bool, str]:
+    def resolver_destinatario(self, identificador: str) -> Tuple[bool, Optional[str], str]:
+        """Resolve uma conta ou chave Pix pelo nome/alias e retorna sua conta real."""
+        chave = self._normalizar_texto(identificador)
+        if not chave:
+            return False, None, ""
+
         with self._conectar() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT nome FROM usuarios WHERE numero_conta = ?", (conta_destino.strip(),))
-            row = cursor.fetchone()
-            if row:
-                return True, row["nome"]
-            return False, ""
+            cursor.execute("""
+                SELECT numero_conta, nome
+                FROM usuarios
+                WHERE LOWER(numero_conta) = ? OR LOWER(login_alias) = ?
+            """, (chave, chave))
+            correspondencias = cursor.fetchall()
+            if not correspondencias:
+                cursor.execute("SELECT numero_conta, nome FROM usuarios")
+                correspondencias = [
+                    row for row in cursor.fetchall()
+                    if self._normalizar_texto(row["nome"]) == chave
+                ]
+
+        if len(correspondencias) != 1:
+            return False, None, ""
+        row = correspondencias[0]
+        return True, row["numero_conta"], row["nome"]
+
+    def validar_destinatario(self, conta_destino: str) -> Tuple[bool, str]:
+        """Mantém compatibilidade com chamadores que precisam validar o nome."""
+        existe, _, nome = self.resolver_destinatario(conta_destino)
+        return existe, nome
 
     def executar_transferencia(
         self,
